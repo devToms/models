@@ -20,7 +20,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from helpers.csv_data_reader import CsvDataReader
 from loggers.light_logger import LightLogger
 
-training_log_file = "/home/tomasz/projekty/python/app_market_bot/app_market_bot/model_manager/neural_network_models/training_logs/river_training_v6_log.txt"
+training_log_file = "river_training_v6_log.txt"
 training_logger = LightLogger(training_log_file, logger_name="training_logger")
 
 
@@ -53,51 +53,54 @@ class EnhancedEMA:
     def get(self) -> float:
         return self.value if self.value is not None else 0
 
-# W metodzie _setup_indicators():
-def _setup_indicators(self):
-    self.indicators = {
-        'ema_short': EnhancedEMA(5),
-        'ema_long': EnhancedEMA(20),
-        'sma_short': stats.Mean(),
-        'sma_long': stats.Mean(),
-        'volatility': stats.Var(),  # Zmienione z Std() na Var()
-        'momentum': stats.Mean()
-    }
-    self.price_buffer = collections.deque(maxlen=100)
-    self.min_pips_threshold = 0.00015
-    self.warning_threshold = 0.15
+    # W metodzie _setup_indicators():
+    def _setup_indicators(self):
+        self.indicators = {
+            'ema_short': EnhancedEMA(5),
+            'ema_long': EnhancedEMA(20),
+            'sma_short': stats.Mean(),
+            'sma_long': stats.Mean(),
+            'volatility': stats.Var(),  # Zmienione z Std() na Var()
+            'momentum': stats.Mean()
+        }
+        self.price_buffer = collections.deque(maxlen=100)
+        self.min_pips_threshold = 0.00015
+        self.warning_threshold = 0.15
 
-# W metodzie _generate_features():
-def _generate_features(self, bid: float, ask: float) -> Dict[str, float]:
-    spread = ask - bid
-    momentum = bid - self.prev_bid if self.prev_bid else 0
-    volatility = math.sqrt(self.indicators['volatility'].get())  # Oblicz odchylenie standardowe
-    
-    return {
-        'bid': bid,
-        'ask': ask,
-        'spread': spread,
-        'momentum': momentum,
-        'momentum_acc': momentum - (self.prev_bid - self.prev_prev_bid) if self.prev_prev_bid else 0,
-        'ema_short': self.indicators['ema_short'].get(),
-        'ema_long': self.indicators['ema_long'].get(),
-        'ema_ratio': self.indicators['ema_short'].get() / (self.indicators['ema_long'].get() + 1e-8),
-        'sma_short': self.indicators['sma_short'].get(),
-        'sma_long': self.indicators['sma_long'].get(),
-        'sma_diff': self.indicators['sma_short'].get() - self.indicators['sma_long'].get(),
-        'volatility': volatility,  # Użyj obliczonego odchylenia standardowego
-        'volatility_ratio': volatility / (bid + 1e-8),
-        'rsi': self._calculate_rsi(),
-        'bollinger': (bid - self.indicators['sma_long'].get()) / (2 * volatility + 1e-8),
-        'mean_price': np.mean(self.price_buffer) if self.price_buffer else bid
-    }
-    
- ###to jestv8 naprawde   
+    # W metodzie _generate_features():
+    def _generate_features(self, bid: float, ask: float) -> Dict[str, float]:
+        spread = ask - bid
+        momentum = bid - self.prev_bid if self.prev_bid else 0
+        volatility = math.sqrt(self.indicators['volatility'].get())  # Oblicz odchylenie standardowe
+        
+        return {
+            'bid': bid,
+            'ask': ask,
+            'spread': spread,
+            'momentum': momentum,
+            'momentum_acc': momentum - (self.prev_bid - self.prev_prev_bid) if self.prev_prev_bid else 0,
+            'ema_short': self.indicators['ema_short'].get(),
+            'ema_long': self.indicators['ema_long'].get(),
+            'ema_ratio': self.indicators['ema_short'].get() / (self.indicators['ema_long'].get() + 1e-8),
+            'sma_short': self.indicators['sma_short'].get(),
+            'sma_long': self.indicators['sma_long'].get(),
+            'sma_diff': self.indicators['sma_short'].get() - self.indicators['sma_long'].get(),
+            'volatility': volatility,  # Użyj obliczonego odchylenia standardowego
+            'volatility_ratio': volatility / (bid + 1e-8),
+            'rsi': self._calculate_rsi(),
+            'bollinger': (bid - self.indicators['sma_long'].get()) / (2 * volatility + 1e-8),
+            'mean_price': np.mean(self.price_buffer) if self.price_buffer else bid
+        }
+
 class RiverModelTrainer:
     def __init__(self, model_save_path="river_model_v6.pkl.gz"):
         self.logger = training_logger
-        self.model_save_path = model_save_path
-        self.model = self._init_model()
+        self.model_save_path = os.path.abspath(model_save_path)
+        os.makedirs(os.path.dirname(self.model_save_path), exist_ok=True)
+        
+        # Poprawione: nie nadpisuj modelu!
+        self.model = self._load_model() if os.path.exists(self.model_save_path) else self._init_model()
+        
         self.metrics = {
             'accuracy': metrics.Accuracy(),
             'precision': metrics.Precision(),
@@ -109,7 +112,7 @@ class RiverModelTrainer:
         
         signal.signal(signal.SIGINT, self._handle_exit)
         signal.signal(signal.SIGTERM, self._handle_exit)
-
+        
     def _init_model(self):
         return compose.Pipeline(
             ('features', preprocessing.StandardScaler()),
@@ -119,7 +122,6 @@ class RiverModelTrainer:
                 intercept_lr=0.2
             ))
         )
-
 
     def _setup_indicators(self):
         self.indicators = {
@@ -136,7 +138,7 @@ class RiverModelTrainer:
 
     def _init_tracking(self):
         self.tick_count = 0
-        self.save_interval = 1000
+        self.save_interval = 100
         self.benchmark = {'correct': 0, 'total': 0}
         self.prev_bid = None
         self.prev_prev_bid = None
@@ -273,6 +275,7 @@ class RiverModelTrainer:
             return None
         
     def save_model(self):
+        # --- POPRAWKA: backup z timestampem ---
         with gzip.open(self.model_save_path, "wb") as f:
             pickle.dump(self.model, f)
         
@@ -280,9 +283,50 @@ class RiverModelTrainer:
         backup_path = f"river_model_v6_{timestamp}.pkl.gz"
         with gzip.open(backup_path, "wb") as f:
             pickle.dump(self.model, f)
+            
+        self._cleanup_old_backups(max_backups=5)
+    
+  
+    def _load_model(self):
+        """Ładuje najnowszy dostępny model (główny lub backup)"""
+        try:
+            model_dir = os.path.dirname(self.model_save_path)
+            model_files = [
+                f for f in os.listdir(model_dir) 
+                if f.startswith("river_model_v6") and f.endswith(".pkl.gz")
+            ]
+            
+            if not model_files:
+                raise FileNotFoundError("Brak plików modelu")
+            
+            # Wybierz najnowszy plik (sortuj po dacie w nazwie)
+            model_files.sort(reverse=True)
+            latest_model = os.path.join(model_dir, model_files[0])
+            
+            with gzip.open(latest_model, "rb") as f:
+                model = pickle.load(f)
+            
+            self.logger.info(f"Załadowano model z {latest_model}")
+            return model
+            
+        except Exception as e:
+            self.logger.error(f"Błąd ładowania modelu: {str(e)}. Tworzę nowy model.")
+            return self._init_model()
+        
+        
+    def _cleanup_old_backups(self, max_backups=5):
+        model_dir = os.path.dirname(self.model_save_path)
+        model_files = [
+            f for f in os.listdir(model_dir) 
+            if f.startswith("river_model_v6") and f.endswith(".pkl.gz")
+        ]
+        model_files.sort(reverse=True)
+        
+        for old_file in model_files[max_backups:]:
+            os.remove(os.path.join(model_dir, old_file))
 
-        self.logger.info(f"Model saved to {self.model_save_path} and {backup_path}")
 
+       
     def _handle_exit(self, signum, frame):
         self.logger.info("Shutting down gracefully...")
         self.save_model()
