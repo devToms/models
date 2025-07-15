@@ -222,8 +222,8 @@ class RiverModelTrainer:
             X = self._generate_features(tick["bid"], tick["ask"])
             y_true = 1 if tick["bid"] > self.prev_bid else 0
 
-            if abs(X['momentum']) < self.min_pips_threshold:
-                return None
+            # if abs(X['momentum']) < self.min_pips_threshold:
+            #     return None
 
             # Teraz to będzie działać, bo model ma predict_one
             y_pred = self.model.predict_one(X)
@@ -256,7 +256,7 @@ class RiverModelTrainer:
                 "warning": warning,
                 "metrics": {k: round(v.get(), 4) for k, v in self.metrics.items()}
             }
-            self.logger.info(f"River-V8-DECISION: {json.dumps(log_entry)}")
+            self.logger.info(f"River-V6-DECISION: {json.dumps(log_entry)}")
 
             self.tick_count += 1
             if self.tick_count % self.save_interval == 0:
