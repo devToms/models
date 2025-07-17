@@ -20,7 +20,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from helpers.csv_data_reader import CsvDataReader
 from loggers.light_logger import LightLogger
 
-training_log_file = "river_training_v6_log.txt"
+training_log_file = "river_training_v10_log.txt"
 training_logger = LightLogger(training_log_file, logger_name="training_logger")
 
 
@@ -93,10 +93,17 @@ class EnhancedEMA:
         }
 
 class RiverModelTrainer:
-    def __init__(self, model_save_path="river_model_v6.pkl.gz"):
+    def __init__(self, model_save_path="river_model_v10.pkl.gz"):
         self.logger = training_logger
         self.model_save_path = model_save_path
-     
+        
+        
+        self.prediction_horizon = 300  # 5 minut w sekundach
+        self.reassessment_interval = 150  # 2.5 minuty
+        self.last_prediction_time = None
+        self.current_position = None
+        self.prediction_buffer = collections.deque(maxlen=10)
+       
         
         # Poprawione: nie nadpisuj modelu!
         self.model = self._load_or_init_model()
@@ -200,6 +207,7 @@ class RiverModelTrainer:
 
     def process_tick(self, tick_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
+            current_time = datetime.strptime(tick_data["time"], "%Y-%m-%d %H:%M:%S")
             tick = {
                 "time": tick_data["time"],
                 "bid": float(tick_data["bid"]),
@@ -215,60 +223,78 @@ class RiverModelTrainer:
             
             self.price_buffer.append(tick["bid"])
 
-            if self.prev_bid is None:
+            # Inicjalizacja czasu dla pierwszego ticka
+            if self.last_prediction_time is None:
+                self.last_prediction_time = current_time
                 self.prev_bid = tick["bid"]
                 return None
 
+            # Główna logika predykcji 5-minutowych
+            elapsed = (current_time - self.last_prediction_time).total_seconds()
             X = self._generate_features(tick["bid"], tick["ask"])
             y_true = 1 if tick["bid"] > self.prev_bid else 0
 
-            if abs(X['momentum']) < self.min_pips_threshold:
-                return None
+            # Predykcja główna co 5 minut
+            if elapsed >= self.prediction_horizon:
+                y_pred = self.model.predict_one(X)
+                confidence = max(self.model.predict_proba_one(X).values(), default=0.5)
+                
+                self.current_position = {
+                    "prediction": y_pred,
+                    "entry_time": current_time,
+                    "entry_price": tick["bid"],
+                    "confidence": confidence,
+                    "buffer": collections.deque(maxlen=5)  # Bufor dla korekt
+                }
+                self.last_prediction_time = current_time
+                
+                # Logika uczenia tylko na pełnych okresach
+                self.model.learn_one(X, y_true)
+                for metric in self.metrics.values():
+                    metric.update(y_true, y_pred)
 
-            # Teraz to będzie działać, bo model ma predict_one
-            y_pred = self.model.predict_one(X)
-            
-            if not self._validate_signal(X, y_pred):
-                return None
+            # Korekta co 2.5 minuty
+            elif elapsed >= self.reassessment_interval and self.current_position:
+                new_pred = self.model.predict_one(X)
+                self.current_position["buffer"].append(new_pred)
+                
+                # Warunek korekty (3/5 predykcji przeciwne)
+                if sum(1 for p in self.current_position["buffer"] 
+                    if p != self.current_position["prediction"]) >= 3:
+                    self.current_position.update({
+                        "prediction": 1 - self.current_position["prediction"],
+                        "confidence": max(self.model.predict_proba_one(X).values(), default=0.5),
+                        "adjustment_time": current_time
+                    })
 
-            self.model.learn_one(X, y_true)
-            
-            for metric in self.metrics.values():
-                metric.update(y_true, y_pred)
+            # Generowanie sygnału wyjściowego
+            if self.current_position:
+                pips = round((tick["bid"] - self.current_position["entry_price"]) * 10000, 1)
+                warning = self.is_prediction_about_to_change(X, self.current_position["prediction"])
+                
+                log_entry = {
+                    "time": tick["time"],
+                    "bid": tick["bid"],
+                    "prediction": self.current_position["prediction"],
+                    "confidence": self.current_position["confidence"],
+                    "pips": pips,
+                    "warning": warning,
+                    "metrics": {k: round(v.get(), 4) for k, v in self.metrics.items()},
+                    "phase": "initial" if elapsed >= self.prediction_horizon else "reassessment"
+                }
+                
+                self.logger.info(f"River-V8-DECISION: {json.dumps(log_entry)}")
+                
+                self.prev_prev_bid = self.prev_bid
+                self.prev_bid = tick["bid"]
+                
+                return {
+                    "action": "BUY" if self.current_position["prediction"] == 1 else "SELL",
+                    **log_entry
+                }
 
-            error = 0 if y_true == y_pred else 1
-            self.drift_detector.update(error)
-            if self.drift_detector.drift_detected:
-                self.logger.warning("Drift detected! Resetting model...")
-                self.model = self._init_model()
-                self.drift_detector = drift.ADWIN(delta=0.002)
-
-            pips = round((tick["bid"] - self.prev_bid) * 10000, 1)
-            confidence = max(self.model.predict_proba_one(X).values(), default=0.5)
-            warning = self.is_prediction_about_to_change(X, y_pred)
-
-            log_entry = {
-                "time": tick["time"],
-                "bid": tick["bid"],
-                "prediction": y_pred,
-                "confidence": confidence,
-                "pips": pips,
-                "warning": warning,
-                "metrics": {k: round(v.get(), 4) for k, v in self.metrics.items()}
-            }
-            self.logger.info(f"River-V6-DECISION: {json.dumps(log_entry)}")
-
-            self.tick_count += 1
-            if self.tick_count % self.save_interval == 0:
-                self.save_model()
-
-            self.prev_prev_bid = self.prev_bid
             self.prev_bid = tick["bid"]
-
-            return {
-                "action": "BUY" if y_pred == 1 else "SELL",
-                **log_entry
-            }
+            return None
 
         except Exception as e:
             self.logger.error(f"Error processing tick: {str(e)}")
@@ -280,13 +306,13 @@ class RiverModelTrainer:
             pickle.dump(self.model, f)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = f"river_model_v6_{timestamp}.pkl.gz"
+        backup_path = f"river_model_v8_{timestamp}.pkl.gz"
         with gzip.open(backup_path, "wb") as f:
             pickle.dump(self.model, f)
             
         # self._cleanup_old_backups(max_backups=5)
     
-  
+        
     def _load_or_init_model(self):
         if Path(self.model_save_path).exists():
             with gzip.open(self.model_save_path, "rb") as f:
@@ -298,7 +324,7 @@ class RiverModelTrainer:
         model_dir = os.path.dirname(self.model_save_path)
         model_files = [
             f for f in os.listdir(model_dir) 
-            if f.startswith("river_model_v6") and f.endswith(".pkl.gz")
+            if f.startswith("river_model_v10") and f.endswith(".pkl.gz")
         ]
         model_files.sort(reverse=True)
         
@@ -313,11 +339,11 @@ class RiverModelTrainer:
         sys.exit(0)
 
 async def river_websocket_client():
-    uri = "ws://127.0.0.1:8767"
+    uri = "ws://127.0.0.1:8769"
     model = RiverModelTrainer()
 
     async with websockets.connect(uri) as websocket:
-        print("River V6 connected to websocket")
+        print("River V10 connected to websocket")
         while True:
             message = await websocket.recv()
             tick_data = json.loads(message)

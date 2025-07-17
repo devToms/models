@@ -93,13 +93,13 @@ class EnhancedEMA:
         }
 
 class RiverModelTrainer:
-    def __init__(self, model_save_path="river_model_v8.pkl.gz"):
+    def __init__(self, model_save_path="/home/tomasz/projekty/python/app_market_bot/app_market_bot/model_manager/neural_network_models/river_models/river_model_v8.pkl.gz"):
         self.logger = training_logger
-        self.model_save_path = os.path.abspath(model_save_path)
-        os.makedirs(os.path.dirname(self.model_save_path), exist_ok=True)
+        self.model_save_path = model_save_path
+       
         
         # Poprawione: nie nadpisuj modelu!
-        self.model = self._load_model() if os.path.exists(self.model_save_path) else self._init_model()
+        self.model = self._load_or_init_model()
         
         self.metrics = {
             'accuracy': metrics.Accuracy(),
@@ -284,34 +284,14 @@ class RiverModelTrainer:
         with gzip.open(backup_path, "wb") as f:
             pickle.dump(self.model, f)
             
-        self._cleanup_old_backups(max_backups=5)
+        # self._cleanup_old_backups(max_backups=5)
     
-  
-    def _load_model(self):
-        """Ładuje najnowszy dostępny model (główny lub backup)"""
-        try:
-            model_dir = os.path.dirname(self.model_save_path)
-            model_files = [
-                f for f in os.listdir(model_dir) 
-                if f.startswith("river_model_v8") and f.endswith(".pkl.gz")
-            ]
-            
-            if not model_files:
-                raise FileNotFoundError("Brak plików modelu")
-            
-            # Wybierz najnowszy plik (sortuj po dacie w nazwie)
-            model_files.sort(reverse=True)
-            latest_model = os.path.join(model_dir, model_files[0])
-            
-            with gzip.open(latest_model, "rb") as f:
-                model = pickle.load(f)
-            
-            self.logger.info(f"Załadowano model z {latest_model}")
-            return model
-            
-        except Exception as e:
-            self.logger.error(f"Błąd ładowania modelu: {str(e)}. Tworzę nowy model.")
-            return self._init_model()
+        
+    def _load_or_init_model(self):
+        if Path(self.model_save_path).exists():
+            with gzip.open(self.model_save_path, "rb") as f:
+                return pickle.load(f)
+        return self._init_model()
         
         
     def _cleanup_old_backups(self, max_backups=5):
@@ -333,7 +313,7 @@ class RiverModelTrainer:
         sys.exit(0)
 
 async def river_websocket_client():
-    uri = "ws://127.0.0.1:8767"
+    uri = "ws://127.0.0.1:8766"
     model = RiverModelTrainer()
 
     async with websockets.connect(uri) as websocket:
